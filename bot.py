@@ -1,12 +1,6 @@
 """
 RAG Telegram bot — "O'sish nuqtasi" arxivi bilan suhbat.
-Local sentence-transformers (embedding) + Gemini Flash (LLM) ishlatadi.
-
-Workflow:
-  1) Savolni local embedding (internetsiz)
-  2) Eng mos top-K chunkni topamiz (cosine similarity)
-  3) Ularni context sifatida Gemini'ga jo'natamiz (LLM, kichik trafik)
-  4) Javobni yuboramiz
+Tabiiy javob, manbalar ko'rsatilmaydi.
 """
 import json
 import logging
@@ -29,7 +23,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 ALLOWED_USER_IDS = [int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()]
-TOP_K = int(os.getenv("TOP_K", "10"))
+TOP_K = int(os.getenv("TOP_K", "15"))
 
 CHUNKS_FILE = Path("chunks.json")
 EMB_FILE = Path("embeddings.npy")
@@ -66,66 +60,66 @@ def embed_query(text: str) -> np.ndarray:
     return v / (np.linalg.norm(v) + 1e-12)
 
 
-def search(question: str, top_k: int = TOP_K):
+def search(question, top_k=TOP_K):
     q = embed_query(question)
     sims = EMBS_NORMALIZED @ q
     idxs = np.argsort(-sims)[:top_k]
     return [(int(i), float(sims[i]), CHUNKS[i]) for i in idxs]
 
 
-def build_prompt(question: str, hits) -> str:
+def build_prompt(question, hits):
     context_lines = []
     for rank, (_, score, ch) in enumerate(hits, 1):
         date = (ch.get("first_date") or "")[:10]
         sender = ch.get("sender", "Unknown")
         text = ch.get("text", "")
-        context_lines.append(f"[{rank}] {date} — {sender}:\n{text}")
+        context_lines.append(f"[{rank}] {date} - {sender}:\n{text}")
     context = "\n\n".join(context_lines)
-    return f"""Sen "O'sish nuqtasi" Telegram guruhi arxivi bilan ishlaydigan yordamchisan.
-Foydalanuvchi savolini guruh tarixidan kelib chiqib javob ber.
+    return (
+        "Sen 'O'sish nuqtasi' guruhi a'zolarining suhbatlarini biluvchi aqlli yordamchi botsan.\n"
+        "Foydalanuvching - Otaxon (Intelektos), guruh adminlaridan biri.\n\n"
+        "Vazifa: foydalanuvchi savoliga MATERIAL'dan kelib chiqib tabiiy, suhbatdoshlik ohangida javob ber.\n\n"
+        "QOIDALAR:\n"
+        "- Material asosida xulosa chiqar, sintez qil. Bir nechta xabardan birlashtirib, o'z so'zlaringizda ayt.\n"
+        "- Quruq hisobot emas, suhbatdoshlik uslubida yoz - do'st bilan gaplashayotgandek.\n"
+        "- Faqat aniq ma'lumot bo'lmaganda 'Bu haqida arxivda aniq ma'lumot yo'q' de.\n"
+        "- Kim aytgani yoki sanasi muhim bo'lsa gap ichida tabiiy ko'rsat (masalan: 'Maftuna 5-aprelda aytgancha...'), 'Manbalar' ro'yxati ko'rinishida emas.\n"
+        "- O'zbek tilida, Otaxon'ga 'siz' deb murojaat qil.\n"
+        "- Qisqa va aniq, lekin sovuq emas. Inson kabi gaplash.\n"
+        "- Markdown belgilarni ishlatma (** yulduzcha, # va boshqalar). Faqat oddiy matn.\n\n"
+        f"Savol: {question}\n\n"
+        "Guruh xabarlari (siz uchun eng mos keladiganlari):\n"
+        f"{context}\n\n"
+        "Javob (faqat o'zbek tilida, suhbatdoshlik bilan):"
+    )
 
-QOIDALAR:
-- Faqat quyidagi MATERIAL'dan foydalanib javob ber. Yo'q narsani o'ylab topma.
-- Agar savolga material'da javob bo'lmasa: "Bu haqida arxivda ma'lumot topmadim" deb ayt.
-- Sana va kim aytganini eslab o'ting.
-- Qisqa va aniq javob ber.
 
-SAVOL: {question}
-
-MATERIAL (guruh xabarlari):
-{context}
-
-JAVOB (o'zbek tilida):"""
-
-
-def gemini_generate(prompt: str) -> str:
+def gemini_generate(prompt):
     r = requests.post(
         GEMINI_GEN_URL,
         params={"key": GEMINI_KEY},
         json={"contents": [{"parts": [{"text": prompt}]}],
-              "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024}},
+              "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1024}},
         timeout=60,
     )
     if r.status_code != 200:
-        return f"⚠️ Gemini xatosi: {r.status_code}"
+        return f"Gemini xatosi: {r.status_code}"
     data = r.json()
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except (KeyError, IndexError):
-        return "⚠️ Javob bo'sh keldi."
+        return "Javob bo'sh keldi."
 
 
-def is_allowed(user_id: int) -> bool:
+def is_allowed(user_id):
     return not ALLOWED_USER_IDS or user_id in ALLOWED_USER_IDS
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Salom! Men 'O'sish nuqtasi' guruhi arxivi bilan ishlovchi botman.\n\n"
-        f"Indeksda {len(CHUNKS)} ta xabar guruhlangan. Savol bering — "
-        "guruh tarixidan javob topib beraman.\n\n"
-        "Misol: \"Eng ko'p kim gapiradi?\" yoki "
-        "\"Loyiha haqida nima muhokama qilingan?\""
+        "Salom! Men 'O'sish nuqtasi' guruhi xabarlarini yodimda tutgan yordamchingizman.\n\n"
+        f"Indeksda {len(CHUNKS)} ta gap bor. Savol bering - javob topib beraman.\n\n"
+        "Misol: \"cvb so'nggi haftada nima yozdi?\", \"Maftuna narxlar haqida nima degan?\""
     )
 
 
@@ -134,12 +128,12 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for ch in CHUNKS:
         s = ch.get("sender", "?")
         senders[s] = senders.get(s, 0) + 1
-    top = sorted(senders.items(), key=lambda x: -x[1])[:5]
-    txt = f"📊 Arxiv: {len(CHUNKS)} chunk, {sum(senders.values())} xabar\n\nEng faol:\n"
+    top = sorted(senders.items(), key=lambda x: -x[1])[:10]
+    txt = f"Arxiv: {len(CHUNKS)} chunk\n\nEng faol yozuvchilar:\n"
     for s, c in top:
-        txt += f"  • {s}: {c} chunk\n"
+        txt += f"  - {s}: {c}\n"
     if CHUNKS:
-        txt += f"\nDavr: {CHUNKS[0]['first_date'][:10]} → {CHUNKS[-1]['last_date'][:10]}"
+        txt += f"\nDavr: {CHUNKS[0]['first_date'][:10]} -> {CHUNKS[-1]['last_date'][:10]}"
     await update.message.reply_text(txt)
 
 
@@ -172,14 +166,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hits = search(question)
         prompt = build_prompt(question, hits)
         answer = gemini_generate(prompt)
-        sources = "\n\n📚 <i>Manbalar (top-3):</i>\n"
-        for i, (_, score, ch) in enumerate(hits[:3], 1):
-            date = ch.get("first_date", "")[:10]
-            sources += f"{i}. {ch.get('sender', '?')} — {date} (mos: {score:.2f})\n"
-        await msg.reply_text(answer + sources, parse_mode="HTML")
+        await msg.reply_text(answer)
     except Exception as e:
         log.exception("Xato")
-        await msg.reply_text(f"⚠️ Xato: {e}")
+        await msg.reply_text(f"Xato: {e}")
 
 
 def main():
