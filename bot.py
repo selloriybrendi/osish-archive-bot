@@ -1,14 +1,12 @@
 """
 RAG Telegram bot — "O'sish nuqtasi" arxivi bilan suhbat.
+Local sentence-transformers (embedding) + Gemini Flash (LLM) ishlatadi.
 
-Foydalanuvchi savol bersa:
-  1) Savolni embedding'ga aylantiramiz (Gemini)
+Workflow:
+  1) Savolni local embedding (internetsiz)
   2) Eng mos top-K chunkni topamiz (cosine similarity)
-  3) Ularni context sifatida Gemini'ga jo'natamiz
+  3) Ularni context sifatida Gemini'ga jo'natamiz (LLM, kichik trafik)
   4) Javobni yuboramiz
-
-DM (Direct Message) — bot bilan shaxsiy suhbatda
-Group — @bot_username deb chaqirilganda javob beradi
 """
 import json
 import logging
@@ -35,8 +33,8 @@ TOP_K = int(os.getenv("TOP_K", "10"))
 
 CHUNKS_FILE = Path("chunks.json")
 EMB_FILE = Path("embeddings.npy")
+MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
-GEMINI_EMB_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
 GEMINI_GEN_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
@@ -46,7 +44,6 @@ if not BOT_TOKEN or not GEMINI_KEY:
     log.error(".env: BOT_TOKEN va GEMINI_API_KEY bo'lishi kerak.")
     sys.exit(1)
 
-# Indeksni yuklash
 if not CHUNKS_FILE.exists() or not EMB_FILE.exists():
     log.error("chunks.json yoki embeddings.npy topilmadi. Avval index.py ni ishga tushiring.")
     sys.exit(1)
@@ -57,22 +54,21 @@ EMB_NORMS = np.linalg.norm(EMBS, axis=1, keepdims=True) + 1e-12
 EMBS_NORMALIZED = EMBS / EMB_NORMS
 log.info(f"Yuklandi: {len(CHUNKS)} chunk, embeddings shape: {EMBS.shape}")
 
+log.info(f"Local model yuklanmoqda: {MODEL_NAME}")
+from sentence_transformers import SentenceTransformer
+EMBED_MODEL = SentenceTransformer(MODEL_NAME)
+log.info(f"Embed model tayyor (dim={EMBED_MODEL.get_sentence_embedding_dimension()})")
+
 
 def embed_query(text: str) -> np.ndarray:
-    r = requests.post(
-        GEMINI_EMB_URL,
-        params={"key": GEMINI_KEY},
-        json={"model": "models/gemini-embedding-001", "content": {"parts": [{"text": text}]}},
-        timeout=30,
-    )
-    r.raise_for_status()
-    v = np.array(r.json()["embedding"]["values"], dtype=np.float32)
+    v = EMBED_MODEL.encode(text, convert_to_numpy=True)
+    v = v.astype(np.float32)
     return v / (np.linalg.norm(v) + 1e-12)
 
 
 def search(question: str, top_k: int = TOP_K):
     q = embed_query(question)
-    sims = EMBS_NORMALIZED @ q  # cosine similarity
+    sims = EMBS_NORMALIZED @ q
     idxs = np.argsort(-sims)[:top_k]
     return [(int(i), float(sims[i]), CHUNKS[i]) for i in idxs]
 
@@ -92,7 +88,7 @@ QOIDALAR:
 - Faqat quyidagi MATERIAL'dan foydalanib javob ber. Yo'q narsani o'ylab topma.
 - Agar savolga material'da javob bo'lmasa: "Bu haqida arxivda ma'lumot topmadim" deb ayt.
 - Sana va kim aytganini eslab o'ting.
-- Qisqa va aniq javob ber, mosini ko'paytirma.
+- Qisqa va aniq javob ber.
 
 SAVOL: {question}
 
@@ -123,7 +119,6 @@ def is_allowed(user_id: int) -> bool:
     return not ALLOWED_USER_IDS or user_id in ALLOWED_USER_IDS
 
 
-# ---------- Handler'lar ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Salom! Men 'O'sish nuqtasi' guruhi arxivi bilan ishlovchi botman.\n\n"
@@ -157,7 +152,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Sizga bu botdan foydalanishga ruxsat yo'q.")
         return
 
-    # Group'da faqat bot mention qilingan paytda javob beramiz
     bot_username = (await context.bot.get_me()).username
     if msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if not (msg.text.lower().startswith(f"@{bot_username.lower()}") or
@@ -178,7 +172,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hits = search(question)
         prompt = build_prompt(question, hits)
         answer = gemini_generate(prompt)
-        # Manbalarni ham qo'shamiz
         sources = "\n\n📚 <i>Manbalar (top-3):</i>\n"
         for i, (_, score, ch) in enumerate(hits[:3], 1):
             date = ch.get("first_date", "")[:10]
